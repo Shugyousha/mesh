@@ -4,6 +4,7 @@ package mesh
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ type MeSHRecord struct {
 	MN      []string
 	Entries map[string]bool
 	UI      string
+	MS      string
 }
 
 type MeSHRecordsMap map[string]*MeSHRecord
@@ -117,8 +119,12 @@ func ParseMeSHTree(meshinput *bufio.Reader, meshnode MeSHNode) {
 }
 
 func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHRecordsMap) {
-	var record *MeSHRecord
-	var recordsstarted bool
+	var (
+		record         *MeSHRecord
+		recordsstarted bool
+		prevField      string
+		fieldBuffer    bytes.Buffer
+	)
 
 	defer close(meshchan)
 
@@ -144,6 +150,7 @@ func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHR
 		case "*NEWRECORD":
 			recordsstarted = true
 			if record != nil {
+				writeRecordField(record, meshrecs, prevField, fieldBuffer, quotrep)
 				meshchan <- record
 			}
 
@@ -164,27 +171,46 @@ func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHR
 		}
 
 		splitline := strings.SplitN(line, " = ", 2)
-		trimmedvalue := strings.Trim(splitline[1], " ")
-		field := strings.Trim(splitline[0], " ")
-		switch field {
-		case "UI":
-			record.UI = trimmedvalue
-		case "MH":
-			record.MH = trimmedvalue
-		case "MN":
-			record.MN = append(record.MN, trimmedvalue)
-			meshrecs[trimmedvalue] = record
-		case "ENTRY", "PRINT ENTRY":
-			synline := strings.SplitN(trimmedvalue, "|", 2)
-			synstr := synline[0]
-			if strings.Contains(synstr, ", ") {
-				parts := strings.SplitN(synstr, ", ", 2)
-				synstr = parts[1] + " " + parts[0]
+		if len(splitline) < 2 {
+			fieldBuffer.WriteString(strings.TrimSpace(splitline[0]))
+			continue
+		} else {
+			if fieldBuffer.Len() > 0 {
+				writeRecordField(record, meshrecs, prevField, fieldBuffer, quotrep)
+				fieldBuffer.Reset()
 			}
-			record.Entries[quotrep.Replace(synstr)] = true
+			fieldBuffer.WriteString(strings.TrimSpace(splitline[1]))
 		}
+
+		prevField = strings.Trim(splitline[0], " ")
 	}
+
+	writeRecordField(record, meshrecs, prevField, fieldBuffer, quotrep)
+	fieldBuffer.Reset()
 	meshchan <- record
+}
+
+func writeRecordField(record *MeSHRecord, meshrecs MeSHRecordsMap, fieldName string, buf bytes.Buffer, quotrep *strings.Replacer) {
+	value := buf.String()
+	switch fieldName {
+	case "UI":
+		record.UI = value
+	case "MH":
+		record.MH = value
+	case "MS":
+		record.MS = value
+	case "MN":
+		record.MN = append(record.MN, value)
+		meshrecs[value] = record
+	case "ENTRY", "PRINT ENTRY":
+		synline := strings.SplitN(value, "|", 2)
+		synstr := synline[0]
+		if strings.Contains(synstr, ", ") {
+			parts := strings.SplitN(synstr, ", ", 2)
+			synstr = parts[1] + " " + parts[0]
+		}
+		record.Entries[quotrep.Replace(synstr)] = true
+	}
 }
 
 // Parses a MeSH into a slice of MeSHRecords and also fills a map to the
