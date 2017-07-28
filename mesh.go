@@ -11,6 +11,22 @@ import (
 	"strings"
 )
 
+// MeSHParser can be used to parse the MesH records. To do that it
+// exposes several methods. Please note that only one method can be called
+// for each parser. That means if you want to parse the data in two
+// different ways (using two of the different methods that the MeSHParser
+// exposes) you will have to create a MeSHParser for each method to call.
+type MeSHParser struct {
+	meshinput   bufio.Reader
+	quotrep     *strings.Replacer
+	meshrecords MeSHRecordsMap
+}
+
+// MeSHTreeParser parses the MeSHTree into a tree of nodes.
+type MeSHTreeParser struct {
+	meshinput bufio.Reader
+}
+
 type MeSHRecord struct {
 	MH      string
 	MN      []string
@@ -27,6 +43,27 @@ type MeSHNode struct {
 
 func NewNode(contents map[string]*MeSHNode) *MeSHNode {
 	return &MeSHNode{cont: contents}
+}
+
+// NewMeSHParser returns a new MeSHParser that can be used to parse MeSH.
+func NewMeSHParser(r bufio.Reader) *MeSHParser {
+	mp := &MeSHParser{
+		meshinput:   r,
+		meshrecords: make(map[string]*MeSHRecord, 50000),
+		quotrep:     strings.NewReplacer("\"", ""),
+	}
+
+	return mp
+}
+
+// NewMeSHTreeParser returns a new MeSHTreeParser that can be used to
+// parse the MeSH tree.
+func NewMeSHTreeParser(r bufio.Reader) *MeSHTreeParser {
+	mtp := &MeSHTreeParser{
+		meshinput: r,
+	}
+
+	return mtp
 }
 
 func (mn *MeSHNode) Add(nodepath []string) {
@@ -92,10 +129,10 @@ func getsuffices(path string, res []string, mn *MeSHNode) []string {
 	return res
 }
 
-func ParseMeSHTree(meshinput *bufio.Reader, meshnode MeSHNode) {
+func (mtp *MeSHTreeParser) ParseMeSHTree(meshnode MeSHNode) {
 	lineno := 0
 	for {
-		line, err := meshinput.ReadString('\n')
+		line, err := mtp.meshinput.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -118,7 +155,7 @@ func ParseMeSHTree(meshinput *bufio.Reader, meshnode MeSHNode) {
 	}
 }
 
-func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHRecordsMap) {
+func (mp *MeSHParser) parseMeSH(meshchan chan *MeSHRecord) {
 	var (
 		record         *MeSHRecord
 		recordsstarted bool
@@ -128,11 +165,10 @@ func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHR
 
 	defer close(meshchan)
 
-	quotrep := strings.NewReplacer("\"", "")
 	lineno := 0
 
 	for {
-		line, err := meshinput.ReadString('\n')
+		line, err := mp.meshinput.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
 				break
@@ -150,7 +186,7 @@ func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHR
 		case "*NEWRECORD":
 			recordsstarted = true
 			if record != nil {
-				writeRecordField(record, meshrecs, prevField, fieldBuffer, quotrep)
+				mp.writeRecordField(record, prevField, fieldBuffer)
 				meshchan <- record
 			}
 
@@ -176,7 +212,7 @@ func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHR
 			continue
 		} else {
 			if fieldBuffer.Len() > 0 {
-				writeRecordField(record, meshrecs, prevField, fieldBuffer, quotrep)
+				mp.writeRecordField(record, prevField, fieldBuffer)
 				fieldBuffer.Reset()
 			}
 			fieldBuffer.WriteString(strings.TrimSpace(splitline[1]))
@@ -185,12 +221,12 @@ func parseMeSH(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecs MeSHR
 		prevField = strings.Trim(splitline[0], " ")
 	}
 
-	writeRecordField(record, meshrecs, prevField, fieldBuffer, quotrep)
+	mp.writeRecordField(record, prevField, fieldBuffer)
 	fieldBuffer.Reset()
 	meshchan <- record
 }
 
-func writeRecordField(record *MeSHRecord, meshrecs MeSHRecordsMap, fieldName string, buf bytes.Buffer, quotrep *strings.Replacer) {
+func (mp *MeSHParser) writeRecordField(record *MeSHRecord, fieldName string, buf bytes.Buffer) {
 	value := buf.String()
 	switch fieldName {
 	case "UI":
@@ -201,7 +237,7 @@ func writeRecordField(record *MeSHRecord, meshrecs MeSHRecordsMap, fieldName str
 		record.MS = value
 	case "MN":
 		record.MN = append(record.MN, value)
-		meshrecs[value] = record
+		mp.meshrecords[value] = record
 	case "ENTRY", "PRINT ENTRY":
 		synline := strings.SplitN(value, "|", 2)
 		synstr := synline[0]
@@ -209,28 +245,28 @@ func writeRecordField(record *MeSHRecord, meshrecs MeSHRecordsMap, fieldName str
 			parts := strings.SplitN(synstr, ", ", 2)
 			synstr = parts[1] + " " + parts[0]
 		}
-		record.Entries[quotrep.Replace(synstr)] = true
+		record.Entries[mp.quotrep.Replace(synstr)] = true
 	}
 }
 
 // Parses a MeSH into a slice of MeSHRecords and also fills a map to the
 // records and returns it.
-func ParseToSliceAndMap(meshinput bufio.Reader, meshrecords MeSHRecordsMap, mrslice []*MeSHRecord) ([]*MeSHRecord, MeSHRecordsMap) {
+func (mp *MeSHParser) ParseToSliceAndMap() ([]*MeSHRecord, MeSHRecordsMap) {
 	meshchan := make(chan *MeSHRecord, 1000)
+	mrslice := make([]*MeSHRecord, 0, 50000)
 
-	go parseMeSH(meshinput, meshchan, meshrecords)
+	go mp.parseMeSH(meshchan)
 	for mr := range meshchan {
 		mrslice = append(mrslice, mr)
 	}
 
-	return mrslice, meshrecords
+	return mrslice, mp.meshrecords
 }
 
 // This function returns a channel on which pointers to the parsed
 // MeSHRecords will be sent.
-func ParseToChannel(meshinput bufio.Reader, meshchan chan *MeSHRecord) chan *MeSHRecord {
-	meshrecmap := make(map[string]*MeSHRecord)
-	go parseMeSH(meshinput, meshchan, meshrecmap)
+func (mp *MeSHParser) ParseToChannel(meshchan chan *MeSHRecord) chan *MeSHRecord {
+	go mp.parseMeSH(meshchan)
 
 	return meshchan
 }
@@ -239,9 +275,9 @@ func ParseToChannel(meshinput bufio.Reader, meshchan chan *MeSHRecord) chan *MeS
 // MeSHRecords will be sent. We also return the map to the MeSHRecords
 // which can only be used after the channel has been closed (because
 // this indicates that the parsing has been completed).
-func ParseToChannelAndMap(meshinput bufio.Reader, meshchan chan *MeSHRecord, meshrecords MeSHRecordsMap) (chan *MeSHRecord, MeSHRecordsMap) {
+func (mp *MeSHParser) ParseToChannelAndMap(meshchan chan *MeSHRecord) (chan *MeSHRecord, MeSHRecordsMap) {
 
-	go parseMeSH(meshinput, meshchan, meshrecords)
+	go mp.parseMeSH(meshchan)
 
-	return meshchan, meshrecords
+	return meshchan, mp.meshrecords
 }
